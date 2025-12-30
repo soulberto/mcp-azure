@@ -1,0 +1,5 @@
+src/
+.claude/
+tsconfig.json
+*.ts
+!dist/**
