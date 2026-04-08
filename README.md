@@ -1,6 +1,6 @@
 # @slorenzot/mcp-azure
 
-Servidor MCP (Model Context Protocol) para Azure DevOps. Permite interactuar con Work Items, sprints, áreas, comentarios y adjuntos desde cualquier cliente MCP compatible.
+Servidor MCP (Model Context Protocol) para Azure DevOps. Permite interactuar con Work Items, repositorios Git, Pull Requests, sprints, áreas, comentarios y adjuntos desde cualquier cliente MCP compatible.
 
 ## Instalación
 
@@ -52,8 +52,9 @@ Agrega la siguiente configuración en tu archivo `claude_desktop_config.json`:
 2. Haz clic en tu avatar (esquina superior derecha)
 3. Selecciona **Personal Access Tokens**
 4. Crea un nuevo token con los siguientes permisos:
-   - **Work Items**: Read & Write
-   - **Project and Team**: Read (opcional)
+    - **Work Items**: Read & Write
+    - **Code**: Read & Write (para operaciones de repositorios y Pull Requests)
+    - **Project and Team**: Read (opcional)
 
 ## Herramientas Disponibles
 
@@ -86,6 +87,50 @@ Agrega la siguiente configuración en tu archivo `claude_desktop_config.json`:
 |-------------|-------------|
 | `ado_list_iterations` | Lista las iteraciones/sprints del proyecto |
 | `ado_list_areas` | Lista las áreas del proyecto |
+
+### Repositorios Git
+
+| Herramienta | Descripción |
+|-------------|-------------|
+| `ado_list_repositories` | Lista todos los repositorios Git del proyecto |
+| `ado_get_repository` | Obtiene detalles de un repositorio específico por nombre o ID |
+| `ado_list_branches` | Lista las ramas (branches) de un repositorio |
+
+### Pull Requests
+
+| Herramienta | Descripción |
+|-------------|-------------|
+| `ado_list_pull_requests` | Lista Pull Requests con filtros opcionales (status, branches, creador, revisor) |
+| `ado_get_pull_request` | Obtiene detalles completos de un Pull Request |
+| `ado_create_pull_request` | Crea un nuevo Pull Request |
+| `ado_update_pull_request` | Actualiza propiedades de un Pull Request (título, descripción, draft) |
+| `ado_complete_pull_request` | Completa (merge) un Pull Request con estrategia configurable |
+| `ado_abandon_pull_request` | Abandona un Pull Request |
+
+### Pull Request Reviews
+
+| Herramienta | Descripción |
+|-------------|-------------|
+| `ado_approve_pull_request` | Aprueba un Pull Request (voto: 10) |
+| `ado_reject_pull_request` | Rechaza un Pull Request (voto: -10) |
+| `ado_get_pull_request_reviewers` | Obtiene todos los revisores y sus votos de un Pull Request |
+| `ado_add_pull_request_reviewer` | Agrega un revisor a un Pull Request |
+
+### Pull Request Comments
+
+| Herramienta | Descripción |
+|-------------|-------------|
+| `ado_get_pull_request_threads` | Obtiene todos los hilos de comentarios de un Pull Request |
+| `ado_create_pull_request_thread` | Crea un nuevo hilo de comentarios (general o de código) |
+| `ado_reply_to_pull_request_thread` | Responde a un hilo de comentarios existente |
+
+### Pull Request Info
+
+| Herramienta | Descripción |
+|-------------|-------------|
+| `ado_get_pull_request_commits` | Obtiene todos los commits de un Pull Request |
+| `ado_get_pull_request_work_items` | Obtiene los Work Items vinculados a un Pull Request |
+| `ado_update_pull_request_thread_status` | Actualiza el estado de un hilo de comentarios (Fixed, WontFix, etc.) |
 
 ### Comentarios y Discusiones
 
@@ -148,6 +193,72 @@ Agrega la siguiente configuración en tu archivo `claude_desktop_config.json`:
 }
 ```
 
+### Listar Repositorios
+
+```json
+{
+  "includeHidden": false,
+  "top": 50
+}
+```
+
+### Listar Pull Requests Activos
+
+```json
+{
+  "status": "Active",
+  "top": 20
+}
+```
+
+### Crear un Pull Request
+
+```json
+{
+  "repositoryId": "mi-repo",
+  "sourceRefName": "refs/heads/feature-login",
+  "targetRefName": "refs/heads/main",
+  "title": "Implementar login con OAuth",
+  "description": "Esta PR agrega soporte para login con Google OAuth",
+  "reviewerIds": ["12345678-1234-1234-1234-1234567890ab"],
+  "isDraft": false
+}
+```
+
+### Aprobar un Pull Request
+
+```json
+{
+  "pullRequestId": 12345,
+  "repositoryId": "mi-repo"
+}
+```
+
+### Completar (Merge) un Pull Request
+
+```json
+{
+  "pullRequestId": 12345,
+  "repositoryId": "mi-repo",
+  "mergeStrategy": "Squash",
+  "deleteSourceBranch": true,
+  "mergeCommitMessage": "Merge de feature-login"
+}
+```
+
+### Crear Comentario en Código
+
+```json
+{
+  "pullRequestId": 12345,
+  "repositoryId": "mi-repo",
+  "content": "Por favor extraer esto en una función separada",
+  "filePath": "/src/components/Login.tsx",
+  "startLine": 45,
+  "endLine": 52
+}
+```
+
 ## Prompts Disponibles
 
 El servidor incluye prompts predefinidos para facilitar tareas comunes:
@@ -200,3 +311,7 @@ MIT
 ## Autor
 
 Soulberto Lorenzo - [@slorenzot](https://github.com/slorenzot)
+
+## Versión
+
+**2.4.0** - 34 herramientas disponibles para Azure DevOps (Work Items, Repositorios Git, Pull Requests, etc.)
