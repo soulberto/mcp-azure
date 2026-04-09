@@ -59,6 +59,8 @@ async function uploadAttachmentRest(
         if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
           try {
             const result = JSON.parse(data);
+            // La URL devuelta por Azure DevOps ya incluye el parámetro fileName
+            // formato: https://dev.azure.com/{org}/{project}/_apis/wit/attachments/{id}?fileName={name}
             resolve({ url: result.url, id: result.id, name: fileName });
           } catch (e) {
             reject(new Error(`Error parsing response: ${data}`));
@@ -1036,23 +1038,26 @@ server.tool(
   },
   async ({ workItemId, filePath, attachmentUrl, comment, name }) => {
     const api = await getWitApi();
-
+ 
     let attachmentId: string | undefined;
     let fileName: string | undefined;
-
+    let attachmentLinkUrl: string | undefined;
+ 
     // Si se proporciona un archivo, subirlo primero usando REST API
     if (filePath) {
       if (!currentPat || !currentOrg) {
         throw new Error("No hay conexión configurada. Usa ado_configure primero.");
       }
-
+ 
       if (!fs.existsSync(filePath)) {
         throw new Error(`El archivo no existe: ${filePath}`);
       }
-
+ 
       fileName = name || path.basename(filePath);
       const attachment = await uploadAttachmentRest(filePath, fileName);
-      // Usar directamente la URL devuelta por Azure DevOps (ya tiene el formato correcto)
+      // Usar directamente la URL devuelta por Azure DevOps (ya incluye el parámetro fileName)
+      // formato: https://dev.azure.com/{org}/{project}/_apis/wit/attachments/{id}?fileName={name}
+      attachmentLinkUrl = attachment.url;
       attachmentId = attachment.id;
     } else if (attachmentUrl) {
       // Extraer el ID del adjunto de la URL
@@ -1064,18 +1069,14 @@ server.tool(
         throw new Error("Formato de URL de adjunto inválido. La URL debe ser la devuelta por ado_upload_attachment");
       }
       fileName = name || "Archivo adjunto";
-    }
-
-    if (!attachmentId) {
+      // Construir la URL para vincular (cuando se usa attachmentUrl)
+      const baseUrl = currentOrg.endsWith("/") ? currentOrg.slice(0, -1) : currentOrg;
+      const encodedProject = encodeURIComponent(currentProject);
+      attachmentLinkUrl = `${baseUrl}/${encodedProject}/_apis/wit/attachments/${attachmentId}`;
+    } else {
       throw new Error("Debe proporcionar filePath o attachmentUrl");
     }
-
-    // Construir la URL correcta para vincular el adjunto al Work Item
-    // Debe incluir el proyecto en la URL
-    const baseUrl = currentOrg.endsWith("/") ? currentOrg.slice(0, -1) : currentOrg;
-    const encodedProject = encodeURIComponent(currentProject);
-    const attachmentLinkUrl = `${baseUrl}/${encodedProject}/_apis/wit/attachments/${attachmentId}`;
-
+ 
     // Vincular el adjunto al Work Item
     const patchDocument: VSSInterfaces.JsonPatchOperation[] = [
       {
@@ -1091,9 +1092,9 @@ server.tool(
         },
       },
     ];
-
+ 
     await api.updateWorkItem(null, patchDocument, workItemId);
-
+ 
     return {
       content: [
         {
