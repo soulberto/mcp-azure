@@ -29,7 +29,7 @@ let currentOrg: string = ENV_ADO_ORG || "";
 async function uploadAttachmentRest(
   filePath: string,
   fileName: string
-): Promise<{ url: string; id: string }> {
+): Promise<{ url: string; id: string; name: string }> {
   const fileContent = fs.readFileSync(filePath);
 
   // Construir URL del API - asegurar que no haya doble slash
@@ -59,7 +59,7 @@ async function uploadAttachmentRest(
         if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
           try {
             const result = JSON.parse(data);
-            resolve({ url: result.url, id: result.id });
+            resolve({ url: result.url, id: result.id, name: fileName });
           } catch (e) {
             reject(new Error(`Error parsing response: ${data}`));
           }
@@ -1032,11 +1032,13 @@ server.tool(
     filePath: z.string().optional().describe("Ruta del archivo a subir (opcional si se usa attachmentUrl)"),
     attachmentUrl: z.string().optional().describe("URL de un adjunto ya subido (opcional si se usa filePath)"),
     comment: z.string().optional().describe("Comentario para el adjunto"),
+    name: z.string().optional().describe("Nombre del adjunto (opcional, por defecto usa el nombre del archivo)"),
   },
-  async ({ workItemId, filePath, attachmentUrl, comment }) => {
+  async ({ workItemId, filePath, attachmentUrl, comment, name }) => {
     const api = await getWitApi();
 
     let attachmentId: string | undefined;
+    let fileName: string | undefined;
 
     // Si se proporciona un archivo, subirlo primero usando REST API
     if (filePath) {
@@ -1048,7 +1050,7 @@ server.tool(
         throw new Error(`El archivo no existe: ${filePath}`);
       }
 
-      const fileName = path.basename(filePath);
+      fileName = name || path.basename(filePath);
       const attachment = await uploadAttachmentRest(filePath, fileName);
       // Usar directamente la URL devuelta por Azure DevOps (ya tiene el formato correcto)
       attachmentId = attachment.id;
@@ -1061,6 +1063,7 @@ server.tool(
       } else {
         throw new Error("Formato de URL de adjunto inválido. La URL debe ser la devuelta por ado_upload_attachment");
       }
+      fileName = name || "Archivo adjunto";
     }
 
     if (!attachmentId) {
@@ -1082,6 +1085,7 @@ server.tool(
           rel: "AttachedFile",
           url: attachmentLinkUrl,
           attributes: {
+            name: fileName,
             comment: comment || "",
           },
         },
@@ -1094,7 +1098,7 @@ server.tool(
       content: [
         {
           type: "text",
-          text: `Adjunto agregado exitosamente al Work Item #${workItemId}\n- URL: ${attachmentLinkUrl}`,
+          text: `Adjunto agregado exitosamente al Work Item #${workItemId}\n- Nombre: ${fileName}\n- URL: ${attachmentLinkUrl}`,
         },
       ],
     };
