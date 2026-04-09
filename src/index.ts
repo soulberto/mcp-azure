@@ -88,7 +88,7 @@ let connection: azdev.WebApi | null = null;
 let workItemTrackingApi: witApi.IWorkItemTrackingApi | null = null;
 let coreApiClient: coreApi.ICoreApi | null = null;
 let gitApiClient: gitApi.IGitApi | null = null;
-let currentProject: string = "";
+let currentProject: string = ENV_ADO_PROJECT || "";
 
 // Helper para obtener la conexión
 async function getConnection(): Promise<azdev.WebApi> {
