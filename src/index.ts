@@ -1032,7 +1032,7 @@ server.tool(
     filePath: z.string().optional().describe("Ruta del archivo a subir (opcional si se usa attachmentUrl)"),
     attachmentUrl: z.string().optional().describe("URL de un adjunto ya subido (opcional si se usa filePath)"),
     comment: z.string().optional().describe("Comentario para el adjunto"),
-    name: z.string().optional().describe("Nombre del adjunto (opcional, por defecto usa el nombre del archivo)"),
+    name: z.string().optional().describe("Nombre del archivo (si no se especifica, usa el nombre del archivo original)"),
   },
   async ({ workItemId, filePath, attachmentUrl, comment, name }) => {
     const api = await getWitApi();
