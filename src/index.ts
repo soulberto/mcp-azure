@@ -812,41 +812,51 @@ server.tool(
   "Lista las iteraciones/sprints disponibles en el proyecto",
   {},
   async () => {
-    const api = await getWitApi();
-    const iterations = await api.getClassificationNode(
-      currentProject,
-      witInterfaces.TreeStructureGroup.Iterations,
-      undefined,
-      10
-    );
+    try {
+      const api = await getWitApi();
+      const iterations = await api.getClassificationNode(
+        currentProject,
+        witInterfaces.TreeStructureGroup.Iterations,
+        undefined,
+        10
+      );
 
-    function formatIterations(
-      node: witInterfaces.WorkItemClassificationNode,
-      indent: string = ""
-    ): string {
-      let result = `${indent}${node.name}`;
-      if (node.attributes) {
-        const startDate = node.attributes["startDate"];
-        const finishDate = node.attributes["finishDate"];
-        if (startDate || finishDate) {
-          result += ` (${startDate ? new Date(startDate).toLocaleDateString() : "?"} - ${finishDate ? new Date(finishDate).toLocaleDateString() : "?"})`;
+      function formatIterations(
+        node: witInterfaces.WorkItemClassificationNode,
+        indent: string = ""
+      ): string {
+        let result = `${indent}${node.name}`;
+        if (node.attributes) {
+          const startDate = node.attributes["startDate"];
+          const finishDate = node.attributes["finishDate"];
+          if (startDate || finishDate) {
+            result += ` (${startDate ? new Date(startDate).toLocaleDateString() : "?"} - ${finishDate ? new Date(finishDate).toLocaleDateString() : "?"})`;
+          }
         }
-      }
-      result += "\n";
+        result += "\n";
 
-      if (node.children) {
-        for (const child of node.children) {
-          result += formatIterations(child, indent + "  ");
+        if (node.children) {
+          for (const child of node.children) {
+            result += formatIterations(child, indent + "  ");
+          }
         }
+        return result;
       }
-      return result;
+
+      const result = formatIterations(iterations);
+
+      return {
+        content: [{ type: "text", text: result }],
+      };
+    } catch (error: any) {
+      return {
+        content: [{
+          type: "text",
+          text: `Error: ${error.message}`
+        }],
+        isError: true
+      };
     }
-
-    const result = formatIterations(iterations);
-
-    return {
-      content: [{ type: "text", text: result }],
-    };
   }
 );
 
@@ -856,32 +866,42 @@ server.tool(
   "Lista las áreas disponibles en el proyecto",
   {},
   async () => {
-    const api = await getWitApi();
-    const areas = await api.getClassificationNode(
-      currentProject,
-      witInterfaces.TreeStructureGroup.Areas,
-      undefined,
-      10
-    );
+    try {
+      const api = await getWitApi();
+      const areas = await api.getClassificationNode(
+        currentProject,
+        witInterfaces.TreeStructureGroup.Areas,
+        undefined,
+        10
+      );
 
-    function formatAreas(
-      node: witInterfaces.WorkItemClassificationNode,
-      indent: string = ""
-    ): string {
-      let result = `${indent}${node.name}\n`;
-      if (node.children) {
-        for (const child of node.children) {
-          result += formatAreas(child, indent + "  ");
+      function formatAreas(
+        node: witInterfaces.WorkItemClassificationNode,
+        indent: string = ""
+      ): string {
+        let result = `${indent}${node.name}\n`;
+        if (node.children) {
+          for (const child of node.children) {
+            result += formatAreas(child, indent + "  ");
+          }
         }
+        return result;
       }
-      return result;
+
+      const result = formatAreas(areas);
+
+      return {
+        content: [{ type: "text", text: result }],
+      };
+    } catch (error: any) {
+      return {
+        content: [{
+          type: "text",
+          text: `Error: ${error.message}`
+        }],
+        isError: true
+      };
     }
-
-    const result = formatAreas(areas);
-
-    return {
-      content: [{ type: "text", text: result }],
-    };
   }
 );
 
