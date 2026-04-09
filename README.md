@@ -46,6 +46,52 @@ Agrega la siguiente configuración en tu archivo `claude_desktop_config.json`:
 }
 ```
 
+### Configuración en OpenCode
+
+OpenCode utiliza el mismo MCP, pero la configuración se puede hacer de dos formas:
+
+#### Opción 1: Configuración inicial con variables de entorno
+
+1. Configura las variables de entorno en tu sistema o en tu configuración de OpenCode:
+   ```bash
+   export AZURE_DEVOPS_ORG="https://dev.azure.com/tu-organizacion"
+   export AZURE_DEVOPS_PAT="tu-pat-aqui"
+   export AZURE_DEVOPS_PROJECT="tu-proyecto"
+   ```
+
+2. O agrega el servidor MCP en tu configuración de OpenCode:
+   ```json
+   {
+     "mcpServers": {
+       "azure-devops": {
+         "command": "npx",
+         "args": ["-y", "@slorenzot/mcp-azure"],
+         "env": {
+           "AZURE_DEVOPS_ORG": "https://dev.azure.com/tu-organizacion",
+           "AZURE_DEVOPS_PAT": "tu-pat-aqui",
+           "AZURE_DEVOPS_PROJECT": "tu-proyecto"
+         }
+       }
+     }
+   }
+   ```
+
+#### Opción 2: Configuración dinámica con `ado_configure`
+
+OpenCode permite configurar la conexión directamente durante la sesión usando el comando `ado_configure`:
+
+```json
+{
+  "organization": "https://dev.azure.com/tu-organizacion",
+  "project": "tu-proyecto",
+  "pat": "tu-pat-aqui"
+}
+```
+
+Esta opción es útil para cambiar entre diferentes organizaciones o proyectos sin modificar el archivo de configuración.
+
+**Nota**: Cuando usas `ado_configure`, la conexión persiste durante la sesión actual de OpenCode.
+
 ### Obtener un Personal Access Token (PAT)
 
 1. Ve a tu organización de Azure DevOps
@@ -189,7 +235,19 @@ Agrega la siguiente configuración en tu archivo `claude_desktop_config.json`:
 {
   "workItemId": 12345,
   "filePath": "/ruta/al/archivo.pdf",
-  "comment": "Documento de especificaciones"
+  "comment": "Documento de especificaciones",
+  "name": "Especificaciones Funcionales v2.0"
+}
+```
+
+### Vincular Adjunto Existente
+
+```json
+{
+  "workItemId": 12345,
+  "attachmentUrl": "https://dev.azure.com/org/proj/_apis/wit/attachments/abc123",
+  "comment": "Diseño de arquitectura",
+  "name": "Arquitectura del Sistema"
 }
 ```
 
@@ -314,4 +372,4 @@ Soulberto Lorenzo - [@slorenzot](https://github.com/slorenzot)
 
 ## Versión
 
-**2.4.0** - 34 herramientas disponibles para Azure DevOps (Work Items, Repositorios Git, Pull Requests, etc.)
+**2.4.1** - 34 herramientas disponibles para Azure DevOps (Work Items, Repositorios Git, Pull Requests, etc.)
