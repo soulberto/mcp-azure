@@ -595,6 +595,177 @@ function formatCommitList(commits: gitInterfaces.GitCommitRef[]): string {
 }
 
 // ============================================
+// FUNCIONES PARA MANEJO DE CONCURRENCIA EN ADJUNTOS
+// ============================================
+
+// Detectar si el error es TF26071 (concurrencia)
+function isConcurrencyError(error: any): boolean {
+  const errorString = error?.message || error?.toString() || '';
+  return errorString.includes('TF26071') ||
+         errorString.includes('changed by someone else') ||
+         errorString.includes('has been changed by someone else since you opened it');
+}
+
+// Función de sleep para backoff exponencial
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Obtener Work Item actualizado (para re-fetch en retry)
+async function getWorkItemForRetry(workItemId: number): Promise<witInterfaces.WorkItem> {
+  const api = await getWitApi();
+  return await safeApiCall(
+    () => api.getWorkItem(workItemId, undefined, undefined, witInterfaces.WorkItemExpand.All),
+    `Error al obtener Work Item #${workItemId} para retry`
+  );
+}
+
+// Sistema de cola por Work Item para manejar concurrencia
+class AttachmentQueueManager {
+  private queues: Map<number, Promise<any>> = new Map();
+
+  async addToQueue<T>(
+    workItemId: number,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    // Si ya hay cola para este WI, esperar a que termine
+    const existingQueue = this.queues.get(workItemId);
+    if (existingQueue) {
+      console.error(`⏳ Encolando adjunto para WI #${workItemId} (ya hay operación en curso)...`);
+      try {
+        await existingQueue;
+      } catch {
+        // Si la operación anterior falló, proceder con la nuestra
+        console.error(`⚠️  Operación anterior falló, procediendo con nueva operación para WI #${workItemId}`);
+      }
+    }
+
+    // Crear nueva cola para este WI
+    const queue = operation().finally(() => {
+      // Limpiar cola cuando termine
+      this.queues.delete(workItemId);
+    });
+
+    this.queues.set(workItemId, queue);
+    return queue;
+  }
+
+  hasActiveQueue(workItemId: number): boolean {
+    return this.queues.has(workItemId);
+  }
+}
+
+// Instancia global del gestor de colas
+const attachmentQueue = new AttachmentQueueManager();
+
+// Función principal con retry y re-fetch para manejar concurrencia
+async function addAttachmentWithRetry(
+  workItemId: number,
+  attachmentData: {
+    filePath?: string;
+    attachmentUrl?: string;
+    comment?: string;
+    name?: string;
+  },
+  maxRetries: number = 3
+): Promise<{ content: any }> {
+  let lastError: any = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.error(`🔄 Intento ${attempt}/${maxRetries} para adjuntar a WI #${workItemId}`);
+
+      // 1. Recuperar versión ACTUAL del WI (CRÍTICO para cada intento)
+      const currentWI = await getWorkItemForRetry(workItemId);
+      console.error(`📄 WI #${workItemId} versión actual: ${currentWI.rev}`);
+
+      // 2. Procesar adjunto
+      let attachmentId: string | undefined;
+      let fileName: string | undefined;
+      let attachmentLinkUrl: string | undefined;
+
+      if (attachmentData.filePath) {
+        // Subir archivo nuevo
+        if (!currentPat || !currentOrg) {
+          throw new Error("No hay conexión configurada. Usa ado_configure primero.");
+        }
+
+        if (!fs.existsSync(attachmentData.filePath)) {
+          throw new Error(`El archivo no existe: ${attachmentData.filePath}`);
+        }
+
+        fileName = attachmentData.name || path.basename(attachmentData.filePath);
+        const attachment = await uploadAttachmentRest(attachmentData.filePath, fileName);
+        attachmentId = attachment.id;
+        attachmentLinkUrl = attachment.url;
+      } else if (attachmentData.attachmentUrl) {
+        // Usar adjunto existente
+        const urlParts = attachmentData.attachmentUrl.split('/attachments/');
+        if (urlParts.length === 2) {
+          attachmentId = urlParts[1].split('?')[0];
+        } else {
+          throw new Error("Formato de URL de adjunto inválido. La URL debe ser la devuelta por ado_upload_attachment");
+        }
+        fileName = attachmentData.name || "Archivo adjunto";
+        const baseUrl = currentOrg.endsWith("/") ? currentOrg.slice(0, -1) : currentOrg;
+        const encodedProject = getEncodedProject(currentProject);
+        attachmentLinkUrl = `${baseUrl}/${encodedProject}/_apis/wit/attachments/${attachmentId}`;
+      } else {
+        throw new Error("Debe proporcionar filePath o attachmentUrl");
+      }
+
+      // 3. Vincular adjunto al WI usando la versión ACTUAL
+      const api = await getWitApi();
+      const patchDocument: VSSInterfaces.JsonPatchOperation[] = [
+        {
+          op: VSSInterfaces.Operation.Add,
+          path: "/relations/-",
+          value: {
+            rel: "AttachedFile",
+            url: attachmentLinkUrl,
+            attributes: {
+              name: fileName,
+              comment: attachmentData.comment || "",
+            },
+          },
+        },
+      ];
+
+      // 4. Actualizar WI con la versión actual
+      await api.updateWorkItem(null, patchDocument, workItemId);
+
+      console.error(`✅ Adjunto agregado exitosamente a WI #${workItemId}`);
+
+      return {
+        content: [{
+          type: "text",
+          text: `Adjunto agregado exitosamente al Work Item #${workItemId}\n- Nombre: ${fileName}\n- URL: ${attachmentLinkUrl}`,
+        }],
+      };
+
+    } catch (error: any) {
+      lastError = error;
+      console.error(`❌ Error en intento ${attempt}:`, error.message);
+
+      // Verificar si es error de concurrencia TF26071 y quedan reintentos
+      if (isConcurrencyError(error) && attempt < maxRetries) {
+        const backoffTime = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
+        console.error(`⏳ Error TF26071 detectado. Esperando ${backoffTime}ms antes de reintentar...`);
+        console.error(`🔄 Reintentando con nueva versión del WI...`);
+        await sleep(backoffTime);
+        continue;
+      }
+
+      // Si no es TF26071 o se agotaron reintentos, lanzar error
+      throw error;
+    }
+  }
+
+  // Si se agotaron todos los reintentos, lanzar el último error
+  throw lastError;
+}
+
+// ============================================
 // HERRAMIENTAS DE AZURE DEVOPS - AUTENTICACIÓN
 // ============================================
 
@@ -1393,10 +1564,10 @@ server.tool(
   }
 );
 
-// Agregar adjunto a un Work Item existente
+// Agregar adjunto a un Work Item existente con manejo de concurrencia
 server.tool(
   "ado_add_attachment",
-  "Agrega un adjunto a un Work Item existente. Puede subir un archivo nuevo o vincular uno ya subido.",
+  "Agrega un adjunto a un Work Item existente. Maneja automáticamente concurrencia cuando múltiples adjuntos se agregan al mismo WI.",
   {
     workItemId: z.number().describe("ID del Work Item"),
     filePath: z.string().optional().describe("Ruta del archivo a subir (opcional si se usa attachmentUrl)"),
@@ -1405,72 +1576,22 @@ server.tool(
     name: z.string().optional().describe("Nombre del archivo (si no se especifica, usa el nombre del archivo original)"),
   },
   async ({ workItemId, filePath, attachmentUrl, comment, name }) => {
-    const api = await getWitApi();
- 
-    let attachmentId: string | undefined;
-    let fileName: string | undefined;
-    let attachmentLinkUrl: string | undefined;
- 
-    // Si se proporciona un archivo, subirlo primero usando REST API
-    if (filePath) {
-      if (!currentPat || !currentOrg) {
-        throw new Error("No hay conexión configurada. Usa ado_configure primero.");
-      }
- 
-      if (!fs.existsSync(filePath)) {
-        throw new Error(`El archivo no existe: ${filePath}`);
-      }
- 
-      fileName = name || path.basename(filePath);
-      const attachment = await uploadAttachmentRest(filePath, fileName);
-      // Usar directamente la URL devuelta por Azure DevOps (ya incluye el parámetro fileName)
-      // formato: https://dev.azure.com/{org}/{project}/_apis/wit/attachments/{id}?fileName={name}
-      attachmentLinkUrl = attachment.url;
-      attachmentId = attachment.id;
-    } else if (attachmentUrl) {
-      // Extraer el ID del adjunto de la URL
-      // La URL del attachment tiene formato: https://dev.azure.com/{org}/{project}/_apis/wit/attachments/{id}
-      const urlParts = attachmentUrl.split('/attachments/');
-      if (urlParts.length === 2) {
-        attachmentId = urlParts[1].split('?')[0];
-      } else {
-        throw new Error("Formato de URL de adjunto inválido. La URL debe ser la devuelta por ado_upload_attachment");
-      }
-      fileName = name || "Archivo adjunto";
-      // Construir la URL para vincular (cuando se usa attachmentUrl)
-      const baseUrl = currentOrg.endsWith("/") ? currentOrg.slice(0, -1) : currentOrg;
-      const encodedProject = encodeURIComponent(currentProject);
-      attachmentLinkUrl = `${baseUrl}/${encodedProject}/_apis/wit/attachments/${attachmentId}`;
-    } else {
-      throw new Error("Debe proporcionar filePath o attachmentUrl");
+    validateConnection();
+    validateProject();
+
+    // VERIFICAR CONCURRENCIA: Usar sistema de cola por Work Item
+    if (attachmentQueue.hasActiveQueue(workItemId)) {
+      console.error(`⏳ Encolando adjunto para WI #${workItemId} (ya hay operación en curso)`);
+      return await attachmentQueue.addToQueue(workItemId, () =>
+        addAttachmentWithRetry(workItemId, { filePath, attachmentUrl, comment, name })
+      );
     }
- 
-    // Vincular el adjunto al Work Item
-    const patchDocument: VSSInterfaces.JsonPatchOperation[] = [
-      {
-        op: VSSInterfaces.Operation.Add,
-        path: "/relations/-",
-        value: {
-          rel: "AttachedFile",
-          url: attachmentLinkUrl,
-          attributes: {
-            name: fileName,
-            comment: comment || "",
-          },
-        },
-      },
-    ];
- 
-    await api.updateWorkItem(null, patchDocument, workItemId);
- 
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Adjunto agregado exitosamente al Work Item #${workItemId}\n- Nombre: ${fileName}\n- URL: ${attachmentLinkUrl}`,
-        },
-      ],
-    };
+
+    // Sin concurrencia: ejecutar directamente con retry automático
+    console.error(`🚀 Ejecutando adjunto para WI #${workItemId}`);
+    return await attachmentQueue.addToQueue(workItemId, () =>
+      addAttachmentWithRetry(workItemId, { filePath, attachmentUrl, comment, name })
+    );
   }
 );
 
