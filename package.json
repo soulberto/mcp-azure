@@ -1,11 +1,14 @@
 {
   "name": "@slorenzot/mcp-azure",
-  "version": "2.4.5",
-  "description": "Servidor MCP para Azure DevOps",
+  "version": "2.6.0",
+  "description": "Servidor MCP para Azure DevOps con manejo robusto de errores y soporte .mcp.json",
   "keywords": [
     "mcp",
     "azure",
-    "model-context-protocol"
+    "model-context-protocol",
+    "azure-devops",
+    "error-handling",
+    "mcp-json"
   ],
   "license": "MIT",
   "author": "Soulberto Lorenzo",

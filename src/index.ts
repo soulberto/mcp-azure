@@ -15,6 +15,227 @@ import * as path from "path";
 import * as https from "https";
 
 // ============================================
+// INTERFACES Y FUNCIONES DE CONFIGURACIÓN
+// ============================================
+
+interface McpConfig {
+  mcpServers: {
+    'azure-devops'?: {
+      command: string;
+      args: string[];
+      env?: {
+        AZURE_DEVOPS_ORG?: string;
+        AZURE_DEVOPS_PAT?: string;
+        AZURE_DEVOPS_PROJECT?: string;
+        ADO_ORG?: string;
+        ADO_PAT?: string;
+        ADO_PROJECT?: string;
+      };
+    };
+  };
+}
+
+// Búsqueda jerárquica de .mcp.json
+function findMcpConfigFile(): string | null {
+  const searchPaths = [
+    process.cwd(),                    // Directorio actual
+    path.resolve(process.cwd(), '.'), // Directorio actual (alternativo)
+    path.resolve(process.cwd(), '..'), // Directorio padre
+    __dirname,                       // Directorio del script
+  ];
+
+  for (const searchPath of searchPaths) {
+    const configPath = path.join(searchPath, '.mcp.json');
+    if (fs.existsSync(configPath)) {
+      console.error(`Archivo .mcp.json encontrado en: ${configPath}`);
+      return configPath;
+    }
+  }
+
+  // Fallback a home del usuario
+  const homeConfigPath = path.join(require('os').homedir(), '.mcp.json');
+  if (fs.existsSync(homeConfigPath)) {
+    console.error(`Archivo .mcp.json encontrado en home: ${homeConfigPath}`);
+    return homeConfigPath;
+  }
+
+  return null;
+}
+
+// Carga segura de configuración
+function loadMcpConfig(): McpConfig | null {
+  try {
+    const configPath = findMcpConfigFile();
+    if (!configPath) {
+      console.error('No se encontró archivo .mcp.json, usando variables de entorno como fallback');
+      return null;
+    }
+
+    const configContent = fs.readFileSync(configPath, 'utf8');
+    const config = JSON.parse(configContent) as McpConfig;
+
+    if (!config.mcpServers?.['azure-devops']) {
+      throw new Error('El archivo .mcp.json no contiene configuración para azure-devops');
+    }
+
+    return config;
+  } catch (error: any) {
+    console.error(`Error al cargar .mcp.json: ${error.message}`);
+    console.error('Usando variables de entorno como fallback');
+    return null;
+  }
+}
+
+// Obtener credenciales con fallback jerárquico
+function getConfigurationWithFallback(): {
+  organization?: string;
+  project?: string;
+  pat?: string;
+  source: string;
+} {
+  // Intentar 1: .mcp.json
+  const mcpConfig = loadMcpConfig();
+  if (mcpConfig) {
+    const azureConfig = mcpConfig.mcpServers['azure-devops']!;
+    const env = azureConfig.env || {};
+    
+    const org = env.AZURE_DEVOPS_ORG || env.ADO_ORG;
+    const pat = env.AZURE_DEVOPS_PAT || env.ADO_PAT;
+    const project = env.AZURE_DEVOPS_PROJECT || env.ADO_PROJECT;
+
+    if (org && pat) {
+      console.error(`Usando configuración desde .mcp.json`);
+      return { organization: org, project: project, pat, source: '.mcp.json' };
+    }
+  }
+
+  // Intentar 2: Variables de entorno (fallback)
+  const org = ENV_ADO_ORG;
+  const pat = ENV_ADO_PAT;
+  const project = ENV_ADO_PROJECT;
+
+  if (org && pat) {
+    console.error(`Usando configuración desde variables de entorno`);
+    return { organization: org, project: project, pat, source: 'environment' };
+  }
+
+  // Intento 3: Error
+  throw new Error(
+    `No se encontró configuración. Por favor:\n` +
+    `1. Crea un archivo .mcp.json en tu proyecto, o\n` +
+    `2. Configura las variables de entorno:\n` +
+    `   - AZURE_DEVOPS_ORG: URL de la organización\n` +
+    `   - AZURE_DEVOPS_PAT: Personal Access Token\n` +
+    `   - AZURE_DEVOPS_PROJECT: Nombre del proyecto`
+  );
+}
+
+// Determina si un nombre de proyecto necesita codificación URL
+function shouldEncodeProject(projectName: string): boolean {
+  if (!projectName) return false;
+  
+  // Caracteres que deben codificarse en URLs
+  const urlUnsafeChars = /[ \s<>#%{}|\\^~\[\]`"']/;
+  return urlUnsafeChars.test(projectName);
+}
+
+// Obtiene el nombre del proyecto con codificación condicional
+function getEncodedProject(projectName: string): string {
+  if (!projectName) return '';
+  return shouldEncodeProject(projectName) 
+    ? encodeURIComponent(projectName) 
+    : projectName;
+}
+
+// Función de logging para mostrar información de codificación
+function logEncodingInfo(projectName: string, source: string): void {
+  if (!projectName) return;
+  
+  const needsEncoding = shouldEncodeProject(projectName);
+  console.error(`Configuración cargada desde: ${source}`);
+  console.error(`  - Proyecto: "${projectName}"`);
+  console.error(`  - Requiere codificación URL: ${needsEncoding ? 'SÍ' : 'NO'}`);
+  
+  if (needsEncoding) {
+    const encoded = getEncodedProject(projectName);
+    console.error(`  - Versión codificada: "${encoded}"`);
+    console.error(`  - NOTA: Solo se usa en operaciones REST manuales (adjuntos)`);
+  }
+}
+
+// Helper functions de validación
+function validateConnection(): void {
+  if (!connection) {
+    throw new Error(
+      `❌ No hay conexión configurada con Azure DevOps.
+      
+      Soluciones:
+      1. Crea un archivo .mcp.json en tu proyecto, o
+      2. Configura las variables de entorno, o
+      3. Usa el comando ado_configure()
+      
+      Variables de entorno requeridas:
+      - AZURE_DEVOPS_ORG (o ADO_ORG): URL de la organización
+      - AZURE_DEVOPS_PAT (o ADO_PAT): Personal Access Token
+      - AZURE_DEVOPS_PROJECT (o ADO_PROJECT): Nombre del proyecto`
+    );
+  }
+}
+
+function validateProject(): void {
+  if (!currentProject) {
+    throw new Error(
+      `❌ No hay proyecto configurado.
+      
+      Soluciones:
+      1. Agrega "AZURE_DEVOPS_PROJECT" a tu .mcp.json, o
+      2. Configura la variable de entorno AZURE_DEVOPS_PROJECT, o
+      3. Usa el comando ado_configure() para especificar el proyecto`
+    );
+  }
+}
+
+// Acceso seguro a propiedades anidadas
+function safeGet<T>(obj: any, path: string, defaultValue?: T): T | null {
+  try {
+    const result = path.split('.').reduce((current, key) => current?.[key], obj);
+    return result !== undefined ? result : (defaultValue ?? null);
+  } catch {
+    return defaultValue ?? null;
+  }
+}
+
+// Envoltura segura para llamadas API
+async function safeApiCall<T>(
+  apiCall: () => Promise<T>, 
+  errorMessage: string
+): Promise<T> {
+  try {
+    validateConnection();
+    const result = await apiCall();
+    
+    if (result === null || result === undefined) {
+      throw new Error(`${errorMessage}: respuesta nula o indefinida`);
+    }
+    
+    return result;
+  } catch (error: any) {
+    throw new Error(`${errorMessage}: ${error.message}`);
+  }
+}
+
+// Formato consistente de respuestas de error
+function errorResponse(message: string, isError: boolean = true): any {
+  return {
+    content: [{
+      type: "text",
+      text: `❌ Error: ${message}`
+    }],
+    isError: isError
+  };
+}
+
+// ============================================
 // VARIABLES DE ENTORNO
 // ============================================
 const ENV_ADO_ORG = process.env.AZURE_DEVOPS_ORG || process.env.ADO_ORG;
@@ -30,11 +251,19 @@ async function uploadAttachmentRest(
   filePath: string,
   fileName: string
 ): Promise<{ url: string; id: string; name: string }> {
+  if (!currentPat || !currentOrg) {
+    throw new Error("❌ No hay conexión configurada. Usa ado_configure primero.");
+  }
+
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`❌ El archivo no existe: ${filePath}`);
+  }
+
   const fileContent = fs.readFileSync(filePath);
 
-  // Construir URL del API - asegurar que no haya doble slash
+  // Construir URL del API - usar codificación condicional
   const baseUrl = currentOrg.endsWith("/") ? currentOrg.slice(0, -1) : currentOrg;
-  const encodedProject = encodeURIComponent(currentProject);
+  const encodedProject = getEncodedProject(currentProject);
   const encodedFileName = encodeURIComponent(fileName);
   const fullUrl = `${baseUrl}/${encodedProject}/_apis/wit/attachments?fileName=${encodedFileName}&api-version=7.0`;
 
@@ -94,36 +323,27 @@ let currentProject: string = ENV_ADO_PROJECT || "";
 async function getConnection(): Promise<azdev.WebApi> {
   if (!connection) {
     throw new Error(
-      `No hay conexión configurada con Azure DevOps.
-
-Configura las siguientes variables de entorno:
-  - AZURE_DEVOPS_ORG (o ADO_ORG): URL de la organización (ej: https://dev.azure.com/mi-org)
-  - AZURE_DEVOPS_PAT (o ADO_PAT): Personal Access Token
-  - AZURE_DEVOPS_PROJECT (o ADO_PROJECT): Nombre del proyecto (opcional)
-
- Para obtener un PAT:
-  1. Ve a tu organización de Azure DevOps
-  2. Haz clic en tu avatar > Personal Access Tokens
-  3. Crea un nuevo token con permisos de:
-     - Work Items (Read & Write)
-     - Code (Read & Write)
-
-Ejemplo de configuración MCP:
-{
-  "mcpServers": {
-    "azure-devops": {
-      "command": "npx",
-      "args": ["-y", "@slorenzot/mcp-azure"],
-      "env": {
-        "AZURE_DEVOPS_ORG": "https://dev.azure.com/tu-organizacion",
-        "AZURE_DEVOPS_PAT": "tu-pat-aqui",
-        "AZURE_DEVOPS_PROJECT": "tu-proyecto"
-      }
-    }
-  }
-}`
+      `❌ No hay conexión configurada con Azure DevOps.
+      
+      Soluciones:
+      1. Crea un archivo .mcp.json en tu proyecto, o
+      2. Configura las variables de entorno, o
+      3. Usa el comando ado_configure()
+      
+      Variables de entorno requeridas:
+      - AZURE_DEVOPS_ORG (o ADO_ORG): URL de la organización
+      - AZURE_DEVOPS_PAT (o ADO_PAT): Personal Access Token
+      - AZURE_DEVOPS_PROJECT (o ADO_PROJECT): Nombre del proyecto`
     );
   }
+  
+  // Verificar que la conexión sigue siendo válida
+  try {
+    await connection.connect();
+  } catch (error) {
+    throw new Error(`Conexión inválida: ${error instanceof Error ? error.message : 'Error desconocido'}`);
+  }
+  
   return connection;
 }
 
@@ -156,23 +376,28 @@ async function getGitApi(): Promise<gitApi.IGitApi> {
 
 // Helper para formatear Work Item
 function formatWorkItem(workItem: witInterfaces.WorkItem): string {
+  if (!workItem) {
+    return JSON.stringify({ error: "❌ Work Item nulo o inválido" }, null, 2);
+  }
+
   const fields = workItem.fields || {};
+  
   return JSON.stringify(
     {
-      id: workItem.id,
-      rev: workItem.rev,
-      url: workItem.url,
+      id: workItem.id || null,
+      rev: workItem.rev || null,
+      url: workItem.url || null,
       fields: {
-        title: fields["System.Title"],
-        state: fields["System.State"],
-        workItemType: fields["System.WorkItemType"],
-        assignedTo: fields["System.AssignedTo"]?.displayName,
-        areaPath: fields["System.AreaPath"],
-        iterationPath: fields["System.IterationPath"],
-        description: fields["System.Description"],
-        tags: fields["System.Tags"],
-        createdDate: fields["System.CreatedDate"],
-        changedDate: fields["System.ChangedDate"],
+        title: fields["System.Title"] || "📝 Sin título",
+        state: fields["System.State"] || "📊 Sin estado",
+        workItemType: fields["System.WorkItemType"] || "🔍 Tipo desconocido",
+        assignedTo: safeGet(fields, "System.AssignedTo.displayName"),
+        areaPath: fields["System.AreaPath"] || null,
+        iterationPath: fields["System.IterationPath"] || null,
+        description: fields["System.Description"] || null,
+        tags: fields["System.Tags"] || null,
+        createdDate: fields["System.CreatedDate"] || null,
+        changedDate: fields["System.ChangedDate"] || null,
       },
     },
     null,
@@ -387,6 +612,16 @@ server.tool(
       .describe("Token de acceso personal (PAT) de Azure DevOps"),
   },
   async ({ organization, project, pat }) => {
+    // Validar formato PAT básico
+    if (!pat || pat.length < 10) {
+      return errorResponse("PAT inválido: debe tener al menos 10 caracteres");
+    }
+
+    // Validar formato de organización
+    if (!organization.startsWith('http')) {
+      return errorResponse("URL de organización inválida: debe comenzar con http:// o https://");
+    }
+
     const authHandler = azdev.getPersonalAccessTokenHandler(pat);
     connection = new azdev.WebApi(organization, authHandler);
     workItemTrackingApi = null;
@@ -396,14 +631,30 @@ server.tool(
     currentPat = pat;
     currentOrg = organization;
 
-    // Verificar conexión
+    // Verificar conexión con timeout
     try {
-      const connData = await connection.connect();
+      const connectionPromise = connection.connect();
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error("Timeout de conexión (10s)")), 10000)
+      );
+      
+      const connData = await Promise.race([connectionPromise, timeoutPromise]) as any;
+
+      if (!connData || !connData.authenticatedUser) {
+        throw new Error("Conexión fallida: no se obtuvo información de usuario autenticado");
+      }
+
+      // Mostrar información de codificación
+      const needsEncoding = shouldEncodeProject(project);
+      const encodingInfo = needsEncoding 
+        ? `\n- Codificación URL: REQUERIDA\n- Proyecto codificado: ${getEncodedProject(project)}`
+        : '\n- Codificación URL: no necesaria';
+
       return {
         content: [
           {
             type: "text",
-            text: `Conexión establecida exitosamente.\n- Organización: ${organization}\n- Proyecto: ${project}\n- Usuario autenticado: ${connData.authenticatedUser?.providerDisplayName || "N/A"}`,
+            text: `✅ Conexión establecida exitosamente.\n- Organización: ${organization}\n- Proyecto: ${project}${encodingInfo}\n- Usuario autenticado: ${connData.authenticatedUser?.providerDisplayName || "N/A"}`,
           },
         ],
       };
@@ -430,23 +681,37 @@ server.tool(
       .describe("Si es true, devuelve todos los campos"),
   },
   async ({ id, full }) => {
-    const api = await getWitApi();
-    const expand = full
-      ? witInterfaces.WorkItemExpand.All
-      : witInterfaces.WorkItemExpand.Fields;
-    const workItem = await api.getWorkItem(id, undefined, undefined, expand);
-
-    if (!workItem) {
-      throw new Error(`Work Item con ID ${id} no encontrado`);
+    if (!id || typeof id !== 'number' || id <= 0) {
+      return errorResponse("ID de Work Item inválido: debe ser un número positivo");
     }
 
-    const result = full
-      ? JSON.stringify(workItem, null, 2)
-      : formatWorkItem(workItem);
+    validateProject();
+    
+    try {
+      const api = await getWitApi();
+      const expand = full
+        ? witInterfaces.WorkItemExpand.All
+        : witInterfaces.WorkItemExpand.Fields;
+      
+      const workItem = await safeApiCall(
+        () => api.getWorkItem(id, undefined, undefined, expand),
+        `Error al obtener Work Item con ID ${id}`
+      );
 
-    return {
-      content: [{ type: "text", text: result }],
-    };
+      if (!workItem) {
+        throw new Error(`Work Item con ID ${id} no encontrado`);
+      }
+
+      const result = full
+        ? JSON.stringify(workItem, null, 2)
+        : formatWorkItem(workItem);
+
+      return {
+        content: [{ type: "text", text: result }],
+      };
+    } catch (error: any) {
+      return errorResponse(error.message);
+    }
   }
 );
 
@@ -470,8 +735,7 @@ server.tool(
       query: `SELECT [System.Id], [System.Title], [System.State], [System.Tags] FROM WorkItems WHERE [System.WorkItemType] = 'User Story'${stateFilter} AND [System.IterationPath] UNDER '${iterationPath}' ORDER BY [System.Id]`,
     };
 
-    const teamContext = { project: currentProject };
-    const queryResult = await api.queryByWiql(wiql, teamContext);
+    const queryResult = await api.queryByWiql(wiql);
     const workItemRefs = queryResult.workItems || [];
 
     if (workItemRefs.length === 0) {
@@ -563,33 +827,67 @@ server.tool(
       .describe("Si es true, obtiene los detalles completos de cada Work Item"),
   },
   async ({ wiql, getDetails }) => {
-    const api = await getWitApi();
-    const wiqlQuery: witInterfaces.Wiql = { query: wiql };
-
-    const teamContext = { project: currentProject };
-    const queryResult = await api.queryByWiql(wiqlQuery, teamContext);
-    const workItemRefs = queryResult.workItems || [];
-
-    if (workItemRefs.length === 0) {
-      return {
-        content: [{ type: "text", text: "No se encontraron resultados" }],
-      };
+    if (!wiql || wiql.trim().length === 0) {
+      return errorResponse("La consulta WIQL es requerida");
     }
 
-    if (!getDetails) {
+    validateProject();
+    
+    try {
+      const api = await getWitApi();
+      const wiqlQuery: witInterfaces.Wiql = { query: wiql.trim() };
+
+      const teamContext = { project: currentProject || "" };
+      const queryResult = await safeApiCall(
+        () => api.queryByWiql(wiqlQuery, teamContext),
+        "Error al ejecutar consulta WIQL"
+      );
+
+      // Validación crítica de la respuesta
+      if (!queryResult) {
+        throw new Error("La consulta WIQL devolvió una respuesta nula");
+      }
+
+      const workItemRefs = safeGet(queryResult, 'workItems', []);
+      
+      if (!Array.isArray(workItemRefs)) {
+        throw new Error("La propiedad 'workItems' no es un array válido");
+      }
+
+      if (workItemRefs.length === 0) {
+        return {
+          content: [{ type: "text", text: "🔍 No se encontraron resultados para la consulta" }],
+        };
+      }
+
+      if (!getDetails) {
+        return {
+          content: [{ type: "text", text: formatWorkItemList(workItemRefs) }],
+        };
+      }
+
+      const ids = workItemRefs
+        .map((wi) => safeGet(wi, 'id'))
+        .filter((id): id is number => 
+          typeof id === 'number' && !isNaN(id) && id !== null && id !== undefined
+        );
+
+      if (ids.length === 0) {
+        return {
+          content: [{ type: "text", text: "⚠️  No se pudieron extraer IDs válidos de los resultados" }],
+        };
+      }
+
+      const workItems = await api.getWorkItems(ids);
+
+      const result = workItems.map((wi) => formatWorkItem(wi)).join("\n---\n");
+
       return {
-        content: [{ type: "text", text: formatWorkItemList(workItemRefs) }],
+        content: [{ type: "text", text: result }],
       };
+    } catch (error: any) {
+      return errorResponse(`Error en consulta WIQL: ${error.message}`);
     }
-
-    const ids = workItemRefs.map((wi) => wi.id!).filter((id): id is number => id !== undefined);
-    const workItems = await api.getWorkItems(ids);
-
-    const result = workItems.map((wi) => formatWorkItem(wi)).join("\n---\n");
-
-    return {
-      content: [{ type: "text", text: result }],
-    };
   }
 );
 
@@ -603,32 +901,63 @@ server.tool(
       .describe("Tipo de Work Item (User Story, Bug, Task, etc.)"),
   },
   async ({ workItemType }) => {
-    const api = await getWitApi();
+    if (!workItemType || workItemType.trim().length === 0) {
+      return errorResponse("El tipo de Work Item es requerido");
+    }
 
-    const fields = await api.getWorkItemTypeFieldsWithReferences(
-      currentProject,
-      workItemType
-    );
+    validateProject();
+    
+    try {
+      const api = await getWitApi();
 
-    const result = fields.map((field) => {
-      const required = field.alwaysRequired ? "REQUERIDO" : "opcional";
-      const allowedValues = field.allowedValues?.length
-        ? `\n     Valores permitidos: ${field.allowedValues.join(", ")}`
-        : "";
-      const defaultValue = field.defaultValue
-        ? `\n     Valor por defecto: ${field.defaultValue}`
-        : "";
-      return `- ${field.referenceName} (${required})${allowedValues}${defaultValue}`;
-    });
+      const fields = await safeApiCall(
+        () => api.getWorkItemTypeFieldsWithReferences(currentProject, workItemType),
+        `Error al obtener campos para tipo "${workItemType}"`
+      );
 
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Campos para "${workItemType}":\n\n${result.join("\n")}`,
-        },
-      ],
-    };
+      // Validación crítica de la respuesta
+      if (!Array.isArray(fields)) {
+        throw new Error(`La respuesta para tipo "${workItemType}" no es un array válido`);
+      }
+
+      if (fields.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `⚠️  No se encontraron campos para el tipo de Work Item "${workItemType}".`,
+            },
+          ],
+        };
+      }
+
+      const result = fields.map((field) => {
+        // Validación de cada campo
+        if (!field || !field.referenceName) {
+          return `- ❌ Campo inválido (referencia faltante)`;
+        }
+
+        const required = field.alwaysRequired ? "🔒 REQUERIDO" : "⭕ opcional";
+        const allowedValues = field.allowedValues?.length
+          ? `\n     🔸 Valores permitidos: ${field.allowedValues.join(", ")}`
+          : "";
+        const defaultValue = field.defaultValue
+          ? `\n     🏁 Valor por defecto: ${field.defaultValue}`
+          : "";
+        return `- ✅ ${field.referenceName} (${required})${allowedValues}${defaultValue}`;
+      }).filter(item => !item.includes('❌')); // Filtrar campos inválidos
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `📋 Campos para "${workItemType}":\n\n${result.join("\n")}`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      return errorResponse(error.message);
+    }
   }
 );
 
@@ -651,74 +980,103 @@ server.tool(
       .describe("Campos adicionales como objeto {nombreCampo: valor}. Ej: {'Custom.OKR': 'valor'}"),
   },
   async ({ title, type, description, areaPath, iterationPath, assignedTo, fields }) => {
-    const api = await getWitApi();
-
-    const patchDocument: VSSInterfaces.JsonPatchOperation[] = [
-      {
-        op: VSSInterfaces.Operation.Add,
-        path: "/fields/System.Title",
-        value: title,
-      },
-    ];
-
-    if (description) {
-      patchDocument.push({
-        op: VSSInterfaces.Operation.Add,
-        path: "/fields/System.Description",
-        value: description,
-      });
+    validateProject();
+    
+    if (!title || title.trim().length === 0) {
+      return errorResponse("El título del Work Item es requerido y no puede estar vacío");
     }
 
-    if (areaPath) {
-      patchDocument.push({
-        op: VSSInterfaces.Operation.Add,
-        path: "/fields/System.AreaPath",
-        value: areaPath,
-      });
+    if (!type || type.trim().length === 0) {
+      return errorResponse("El tipo de Work Item es requerido");
     }
 
-    if (iterationPath) {
-      patchDocument.push({
-        op: VSSInterfaces.Operation.Add,
-        path: "/fields/System.IterationPath",
-        value: iterationPath,
-      });
-    }
+    try {
+      const api = await getWitApi();
 
-    if (assignedTo) {
-      patchDocument.push({
-        op: VSSInterfaces.Operation.Add,
-        path: "/fields/System.AssignedTo",
-        value: assignedTo,
-      });
-    }
+      const patchDocument: VSSInterfaces.JsonPatchOperation[] = [
+        {
+          op: VSSInterfaces.Operation.Add,
+          path: "/fields/System.Title",
+          value: title.trim(),
+        },
+      ];
 
-    // Agregar campos personalizados
-    if (fields) {
-      for (const [fieldName, value] of Object.entries(fields)) {
+      if (description && description.trim()) {
         patchDocument.push({
           op: VSSInterfaces.Operation.Add,
-          path: `/fields/${fieldName}`,
-          value: value,
+          path: "/fields/System.Description",
+          value: description.trim(),
         });
       }
+
+      if (areaPath && areaPath.trim()) {
+        patchDocument.push({
+          op: VSSInterfaces.Operation.Add,
+          path: "/fields/System.AreaPath",
+          value: areaPath.trim(),
+        });
+      }
+
+      if (iterationPath && iterationPath.trim()) {
+        patchDocument.push({
+          op: VSSInterfaces.Operation.Add,
+          path: "/fields/System.IterationPath",
+          value: iterationPath.trim(),
+        });
+      }
+
+      if (assignedTo && assignedTo.trim()) {
+        patchDocument.push({
+          op: VSSInterfaces.Operation.Add,
+          path: "/fields/System.AssignedTo",
+          value: assignedTo.trim(),
+        });
+      }
+
+      // Agregar campos personalizados
+      if (fields && typeof fields === 'object') {
+        for (const [fieldName, value] of Object.entries(fields)) {
+          if (fieldName && typeof value === 'string') {
+            patchDocument.push({
+              op: VSSInterfaces.Operation.Add,
+              path: `/fields/${fieldName}`,
+              value: value,
+            });
+          }
+        }
+      }
+
+      const workItem = await api.createWorkItem(
+        null,
+        patchDocument,
+        currentProject,
+        type
+      );
+
+      // Validación crítica del work item creado
+      if (!workItem) {
+        throw new Error("No se pudo crear el Work Item: respuesta nula");
+      }
+
+      if (!workItem.fields) {
+        throw new Error("Work Item creado sin campos válidos");
+      }
+
+      if (!workItem.id) {
+        throw new Error("Work Item creado sin ID asignado");
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `✅ Work Item creado exitosamente (#${workItem.id}):\n${formatWorkItem(workItem)}`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      return errorResponse(error.message);
     }
-
-    const workItem = await api.createWorkItem(
-      null,
-      patchDocument,
-      currentProject,
-      type
-    );
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Work Item creado exitosamente:\n${formatWorkItem(workItem)}`,
-        },
-      ],
-    };
   }
 );
 
@@ -814,20 +1172,29 @@ server.tool(
   "Lista las iteraciones/sprints disponibles en el proyecto",
   {},
   async () => {
+    validateProject();
+    
     try {
       const api = await getWitApi();
-      const iterations = await api.getClassificationNode(
-        currentProject,
-        witInterfaces.TreeStructureGroup.Iterations,
-        undefined,
-        10
+      
+      const iterations = await safeApiCall(
+        () => api.getClassificationNode(
+          currentProject,
+          witInterfaces.TreeStructureGroup.Iterations,
+          undefined,
+          10
+        ),
+        "Error al obtener iteraciones/sprints"
       );
 
       function formatIterations(
         node: witInterfaces.WorkItemClassificationNode,
         indent: string = ""
       ): string {
-        let result = `${indent}${node.name}`;
+        // Validación crítica de nombre (evita error null.name)
+        const nodeName = safeGet(node, 'name', '📝 Sin nombre');
+        let result = `${indent}${nodeName}`;
+        
         if (node.attributes) {
           const startDate = node.attributes["startDate"];
           const finishDate = node.attributes["finishDate"];
@@ -837,8 +1204,10 @@ server.tool(
         }
         result += "\n";
 
-        if (node.children) {
-          for (const child of node.children) {
+        // Validación segura de children
+        const children = safeGet(node, 'children', []);
+        if (Array.isArray(children) && children.length > 0) {
+          for (const child of children) {
             result += formatIterations(child, indent + "  ");
           }
         }
@@ -851,13 +1220,7 @@ server.tool(
         content: [{ type: "text", text: result }],
       };
     } catch (error: any) {
-      return {
-        content: [{
-          type: "text",
-          text: `Error: ${error.message}`
-        }],
-        isError: true
-      };
+      return errorResponse(`Error al listar iteraciones: ${error.message}`);
     }
   }
 );
@@ -868,22 +1231,33 @@ server.tool(
   "Lista las áreas disponibles en el proyecto",
   {},
   async () => {
+    validateProject();
+    
     try {
       const api = await getWitApi();
-      const areas = await api.getClassificationNode(
-        currentProject,
-        witInterfaces.TreeStructureGroup.Areas,
-        undefined,
-        10
+      
+      const areas = await safeApiCall(
+        () => api.getClassificationNode(
+          currentProject,
+          witInterfaces.TreeStructureGroup.Areas,
+          undefined,
+          10
+        ),
+        "Error al obtener áreas"
       );
 
       function formatAreas(
         node: witInterfaces.WorkItemClassificationNode,
         indent: string = ""
       ): string {
-        let result = `${indent}${node.name}\n`;
-        if (node.children) {
-          for (const child of node.children) {
+        // Validación crítica de nombre (evita error null.name)
+        const nodeName = safeGet(node, 'name', '📁 Sin nombre');
+        let result = `${indent}${nodeName}\n`;
+        
+        // Validación segura de children
+        const children = safeGet(node, 'children', []);
+        if (Array.isArray(children) && children.length > 0) {
+          for (const child of children) {
             result += formatAreas(child, indent + "  ");
           }
         }
@@ -896,13 +1270,7 @@ server.tool(
         content: [{ type: "text", text: result }],
       };
     } catch (error: any) {
-      return {
-        content: [{
-          type: "text",
-          text: `Error: ${error.message}`
-        }],
-        isError: true
-      };
+      return errorResponse(`Error al listar áreas: ${error.message}`);
     }
   }
 );
@@ -2410,26 +2778,56 @@ server.resource(
 
 // Función para auto-configurar desde variables de entorno
 async function autoConfigureFromEnv(): Promise<void> {
-  if (ENV_ADO_ORG && ENV_ADO_PAT) {
-    try {
-      const authHandler = azdev.getPersonalAccessTokenHandler(ENV_ADO_PAT);
-      connection = new azdev.WebApi(ENV_ADO_ORG, authHandler);
-      workItemTrackingApi = null;
-      coreApiClient = null;
-      gitApiClient = null;
-      currentProject = ENV_ADO_PROJECT || "";
-      currentPat = ENV_ADO_PAT;
-      currentOrg = ENV_ADO_ORG;
+  try {
+    const config = getConfigurationWithFallback();
+    const { organization, project, pat, source } = config;
 
-      const connData = await connection.connect();
-      console.error(`Auto-configurado desde variables de entorno:`);
-      console.error(`  - Organización: ${ENV_ADO_ORG}`);
-      console.error(`  - Proyecto: ${ENV_ADO_PROJECT || "(no especificado)"}`);
-      console.error(`  - Usuario: ${connData.authenticatedUser?.providerDisplayName || "N/A"}`);
-    } catch (error: any) {
-      console.error(`Error al auto-configurar desde variables de entorno: ${error.message}`);
-      connection = null;
+    // Validar formato PAT básico
+    if (!pat || pat.length < 10) {
+      throw new Error("PAT inválido: debe tener al menos 10 caracteres");
     }
+    
+    // Validar formato de organización
+    if (!organization || !organization.startsWith('http')) {
+      throw new Error("URL de organización inválida: debe comenzar con http:// o https://");
+    }
+    
+    const authHandler = azdev.getPersonalAccessTokenHandler(pat);
+    connection = new azdev.WebApi(organization, authHandler);
+    
+    // Probar conexión con timeout
+    const connectionPromise = connection.connect();
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error("Timeout de conexión (10s)")), 10000)
+    );
+    
+    const connData = await Promise.race([connectionPromise, timeoutPromise]) as any;
+    
+    // Validar respuesta de conexión
+    if (!connData || !connData.authenticatedUser) {
+      throw new Error("Conexión fallida: no se obtuvo información de usuario autenticado");
+    }
+    
+    workItemTrackingApi = null;
+    coreApiClient = null;
+    gitApiClient = null;
+    currentProject = project || "";
+    currentPat = pat;
+    currentOrg = organization;
+
+    console.error(`\n✅ Conexión establecida exitosamente:`);
+    console.error(`  - Organización: ${organization}`);
+    console.error(`  - Proyecto: ${project || "(no especificado)"}`);
+    console.error(`  - Usuario: ${connData.authenticatedUser.providerDisplayName || "N/A"}`);
+    console.error(`  - Fuente: ${source}`);
+    
+    // Mostrar información de codificación si hay proyecto
+    if (project) {
+      logEncodingInfo(project, source);
+    }
+  } catch (error: any) {
+    console.error(`❌ Error al auto-configurar: ${error.message}`);
+    connection = null;
   }
 }
 
