@@ -611,6 +611,90 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Extrae el ID de un attachment desde su URL
+function extractAttachmentIdFromUrl(url: string): string | null {
+  if (!url) return null;
+
+  const urlParts = url.split("/attachments/");
+  if (urlParts.length !== 2) {
+    return null;
+  }
+
+  return urlParts[1].split("?")[0] || null;
+}
+
+type ResolvedAttachmentRelation = {
+  relationIndex: number;
+  url: string;
+  name: string;
+  comment: string;
+  attachmentId: string | null;
+};
+
+// Resuelve un adjunto de un Work Item por URL y/o nombre
+function resolveAttachmentRelation(
+  workItem: witInterfaces.WorkItem,
+  criteria: {
+    attachmentUrl?: string;
+    attachmentName?: string;
+  }
+): ResolvedAttachmentRelation {
+  const { attachmentUrl, attachmentName } = criteria;
+
+  if (!attachmentUrl && !attachmentName) {
+    throw new Error("Debe proporcionar attachmentUrl o attachmentName");
+  }
+
+  const relations = workItem.relations || [];
+  const targetAttachmentId = attachmentUrl ? extractAttachmentIdFromUrl(attachmentUrl) : null;
+
+  const matches = relations
+    .map((relation, index) => ({ relation, index }))
+    .filter(({ relation }) => relation.rel === "AttachedFile")
+    .map(({ relation, index }) => {
+      const relationUrl = relation.url || "";
+      const relationName = relation.attributes?.name || "Sin nombre";
+      const relationComment = relation.attributes?.comment || "";
+      const relationAttachmentId = extractAttachmentIdFromUrl(relationUrl);
+
+      let matchesUrl = true;
+      let matchesName = true;
+
+      if (attachmentUrl) {
+        matchesUrl = targetAttachmentId && relationAttachmentId
+          ? targetAttachmentId === relationAttachmentId
+          : relationUrl === attachmentUrl;
+      }
+
+      if (attachmentName) {
+        matchesName = relationName === attachmentName;
+      }
+
+      if (!matchesUrl || !matchesName) {
+        return null;
+      }
+
+      return {
+        relationIndex: index,
+        url: relationUrl,
+        name: relationName,
+        comment: relationComment,
+        attachmentId: relationAttachmentId,
+      };
+    })
+    .filter((match): match is ResolvedAttachmentRelation => match !== null);
+
+  if (matches.length === 0) {
+    throw new Error("No se encontró el adjunto indicado en el Work Item");
+  }
+
+  if (matches.length > 1) {
+    throw new Error("Se encontraron múltiples adjuntos con el mismo nombre; use attachmentUrl");
+  }
+
+  return matches[0];
+}
+
 // Obtener Work Item actualizado (para re-fetch en retry)
 async function getWorkItemForRetry(workItemId: number): Promise<witInterfaces.WorkItem> {
   const api = await getWitApi();
@@ -762,6 +846,69 @@ async function addAttachmentWithRetry(
   }
 
   // Si se agotaron todos los reintentos, lanzar el último error
+  throw lastError;
+}
+
+// Elimina la relación de un adjunto con retry y re-fetch para manejar concurrencia
+async function deleteAttachmentWithRetry(
+  workItemId: number,
+  deleteData: {
+    attachmentUrl?: string;
+    attachmentName?: string;
+    comment?: string;
+  },
+  maxRetries: number = 3
+): Promise<{ content: any }> {
+  let lastError: any = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.error(`🔄 Intento ${attempt}/${maxRetries} para eliminar adjunto de WI #${workItemId}`);
+
+      const currentWI = await getWorkItemForRetry(workItemId);
+      console.error(`📄 WI #${workItemId} versión actual: ${currentWI.rev}`);
+
+      const resolvedAttachment = resolveAttachmentRelation(currentWI, {
+        attachmentUrl: deleteData.attachmentUrl,
+        attachmentName: deleteData.attachmentName,
+      });
+
+      const api = await getWitApi();
+      const patchDocument: VSSInterfaces.JsonPatchOperation[] = [
+        {
+          op: VSSInterfaces.Operation.Remove,
+          path: `/relations/${resolvedAttachment.relationIndex}`,
+        },
+      ];
+
+      await api.updateWorkItem(null, patchDocument, workItemId);
+
+      console.error(`✅ Adjunto eliminado exitosamente de WI #${workItemId}`);
+
+      const reasonLine = deleteData.comment ? `\n- Motivo: ${deleteData.comment}` : "";
+
+      return {
+        content: [{
+          type: "text",
+          text: `Adjunto eliminado exitosamente del Work Item #${workItemId}\n- Nombre: ${resolvedAttachment.name}\n- URL: ${resolvedAttachment.url}${reasonLine}`,
+        }],
+      };
+    } catch (error: any) {
+      lastError = error;
+      console.error(`❌ Error en intento ${attempt}:`, error.message);
+
+      if (isConcurrencyError(error) && attempt < maxRetries) {
+        const backoffTime = Math.pow(2, attempt) * 1000;
+        console.error(`⏳ Error TF26071 detectado. Esperando ${backoffTime}ms antes de reintentar eliminación...`);
+        console.error(`🔄 Reintentando con nueva versión del WI...`);
+        await sleep(backoffTime);
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
   throw lastError;
 }
 
@@ -1337,6 +1484,59 @@ server.tool(
   }
 );
 
+// Eliminar un Work Item
+server.tool(
+  "ado_delete_work_item",
+  "Elimina un Work Item en Azure DevOps. Por defecto realiza borrado lógico; usa destroy=true solo para eliminación permanente.",
+  {
+    id: z.number().describe("ID del Work Item a eliminar"),
+    confirm: z.boolean().describe("Confirmación explícita. Debe ser true para eliminar"),
+    destroy: z.boolean().optional().describe("Si es true, destruye permanentemente el Work Item"),
+    expectedType: z.string().optional().describe("Tipo esperado del Work Item, ej: User Story"),
+  },
+  async ({ id, confirm, destroy, expectedType }) => {
+    validateConnection();
+    validateProject();
+
+    if (!confirm) {
+      return errorResponse("Debe confirmar explícitamente la eliminación con confirm=true");
+    }
+
+    try {
+      const api = await getWitApi();
+      const workItem = await safeApiCall(
+        () => api.getWorkItem(id, undefined, undefined, witInterfaces.WorkItemExpand.Fields, currentProject),
+        `Error al obtener Work Item #${id}`
+      );
+
+      const workItemType = workItem.fields?.["System.WorkItemType"] || "Desconocido";
+      const workItemTitle = workItem.fields?.["System.Title"] || "Sin título";
+
+      if (expectedType && workItemType !== expectedType) {
+        return errorResponse(`El Work Item #${id} no corresponde al tipo esperado: ${expectedType}. Tipo actual: ${workItemType}`);
+      }
+
+      await safeApiCall(
+        () => api.deleteWorkItem(id, currentProject, destroy ?? false),
+        `Error al eliminar Work Item #${id}`
+      );
+
+      const deletionMode = destroy ? "destroy permanente" : "soft delete";
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Work Item eliminado exitosamente\n- ID: ${id}\n- Tipo: ${workItemType}\n- Título: ${workItemTitle}\n- Modo: ${deletionMode}`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      return errorResponse(error.message);
+    }
+  }
+);
+
 // Listar iteraciones/sprints
 server.tool(
   "ado_list_iterations",
@@ -1591,6 +1791,38 @@ server.tool(
     console.error(`🚀 Ejecutando adjunto para WI #${workItemId}`);
     return await attachmentQueue.addToQueue(workItemId, () =>
       addAttachmentWithRetry(workItemId, { filePath, attachmentUrl, comment, name })
+    );
+  }
+);
+
+// Eliminar adjunto de un Work Item existente con manejo de concurrencia
+server.tool(
+  "ado_delete_attachment",
+  "Elimina un adjunto de un Work Item removiendo su relación. Maneja automáticamente concurrencia cuando múltiples cambios afectan el mismo WI.",
+  {
+    workItemId: z.number().describe("ID del Work Item"),
+    attachmentUrl: z.string().optional().describe("URL exacta del adjunto a eliminar"),
+    attachmentName: z.string().optional().describe("Nombre del adjunto a eliminar si no se conoce la URL"),
+    comment: z.string().optional().describe("Motivo o contexto de la eliminación"),
+  },
+  async ({ workItemId, attachmentUrl, attachmentName, comment }) => {
+    validateConnection();
+    validateProject();
+
+    if (!attachmentUrl && !attachmentName) {
+      return errorResponse("Debe proporcionar attachmentUrl o attachmentName");
+    }
+
+    if (attachmentQueue.hasActiveQueue(workItemId)) {
+      console.error(`⏳ Encolando eliminación de adjunto para WI #${workItemId} (ya hay operación en curso)`);
+      return await attachmentQueue.addToQueue(workItemId, () =>
+        deleteAttachmentWithRetry(workItemId, { attachmentUrl, attachmentName, comment })
+      );
+    }
+
+    console.error(`🚀 Ejecutando eliminación de adjunto para WI #${workItemId}`);
+    return await attachmentQueue.addToQueue(workItemId, () =>
+      deleteAttachmentWithRetry(workItemId, { attachmentUrl, attachmentName, comment })
     );
   }
 );

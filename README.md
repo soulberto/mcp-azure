@@ -26,6 +26,33 @@ El servidor se configura automáticamente usando las siguientes variables de ent
 | `AZURE_DEVOPS_PAT` | `ADO_PAT` | Personal Access Token | Sí |
 | `AZURE_DEVOPS_PROJECT` | `ADO_PROJECT` | Nombre del proyecto | No |
 
+### Configuración con `.mcp.json`
+
+El servidor también puede leer credenciales desde un archivo `.mcp.json`, buscándolo en este orden:
+
+1. Directorio actual
+2. Directorio padre
+3. Directorio del script
+4. Home del usuario
+
+Ejemplo:
+
+```json
+{
+  "mcpServers": {
+    "azure-devops": {
+      "command": "npx",
+      "args": ["-y", "@slorenzot/mcp-azure"],
+      "env": {
+        "AZURE_DEVOPS_ORG": "https://dev.azure.com/tu-organizacion",
+        "AZURE_DEVOPS_PAT": "tu-pat-aqui",
+        "AZURE_DEVOPS_PROJECT": "tu-proyecto"
+      }
+    }
+  }
+}
+```
+
 ### Configuración en Claude Desktop
 
 Agrega la siguiente configuración en tu archivo `claude_desktop_config.json`:
@@ -117,6 +144,7 @@ Esta opción es útil para cambiar entre diferentes organizaciones o proyectos s
 | `ado_get_work_item` | Obtiene un Work Item por su ID |
 | `ado_create_work_item` | Crea un nuevo Work Item (User Story, Bug, Task, etc.) |
 | `ado_update_work_item` | Actualiza un Work Item existente |
+| `ado_delete_work_item` | Elimina un Work Item en Azure DevOps (soft delete por defecto) |
 | `ado_get_work_item_type_fields` | Obtiene los campos disponibles/requeridos de un tipo |
 
 ### Consultas
@@ -191,6 +219,7 @@ Esta opción es útil para cambiar entre diferentes organizaciones o proyectos s
 |-------------|-------------|
 | `ado_upload_attachment` | Sube un archivo y devuelve la URL del adjunto |
 | `ado_add_attachment` | Agrega un adjunto a un Work Item |
+| `ado_delete_attachment` | Elimina un adjunto de un Work Item removiendo su relación |
 | `ado_get_attachments` | Lista los adjuntos de un Work Item |
 
 ## Ejemplos de Uso
@@ -250,6 +279,29 @@ Esta opción es útil para cambiar entre diferentes organizaciones o proyectos s
   "name": "Arquitectura del Sistema"
 }
 ```
+
+### Eliminar Adjunto de un Work Item
+
+```json
+{
+  "workItemId": 12345,
+  "attachmentUrl": "https://dev.azure.com/org/proj/_apis/wit/attachments/abc123",
+  "comment": "Adjunto agregado por error"
+}
+```
+
+### Eliminar una User Story
+
+```json
+{
+  "id": 12345,
+  "confirm": true,
+  "destroy": false,
+  "expectedType": "User Story"
+}
+```
+
+`ado_delete_work_item` exige `confirm: true`. Si envías `destroy: true`, la eliminación es permanente.
 
 ### Listar Repositorios
 
@@ -372,4 +424,4 @@ Soulberto Lorenzo - [@slorenzot](https://github.com/slorenzot)
 
 ## Versión
 
-**2.4.1** - 34 herramientas disponibles para Azure DevOps (Work Items, Repositorios Git, Pull Requests, etc.)
+**2.7.0** - 36 herramientas disponibles para Azure DevOps (Work Items, Repositorios Git, Pull Requests, sprints, áreas, comentarios y adjuntos)
