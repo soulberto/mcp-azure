@@ -1,6 +1,6 @@
 {
   "name": "@slorenzot/mcp-azure",
-  "version": "2.7.0",
+  "version": "2.7.1",
   "description": "Servidor MCP para Azure DevOps con manejo robusto de errores, soporte .mcp.json y manejo de concurrencia en adjuntos",
   "keywords": [
     "mcp",
