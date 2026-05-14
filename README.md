@@ -197,6 +197,7 @@ Esta opción es útil para cambiar entre diferentes organizaciones o proyectos s
 | `ado_get_pull_request_threads` | Obtiene todos los hilos de comentarios de un Pull Request |
 | `ado_create_pull_request_thread` | Crea un nuevo hilo de comentarios (general o de código) |
 | `ado_reply_to_pull_request_thread` | Responde a un hilo de comentarios existente |
+| `ado_update_pull_request_thread_status` | Actualiza el estado de un hilo de comentarios (Fixed, WontFix, etc.) |
 
 ### Pull Request Info
 
@@ -204,14 +205,19 @@ Esta opción es útil para cambiar entre diferentes organizaciones o proyectos s
 |-------------|-------------|
 | `ado_get_pull_request_commits` | Obtiene todos los commits de un Pull Request |
 | `ado_get_pull_request_work_items` | Obtiene los Work Items vinculados a un Pull Request |
-| `ado_update_pull_request_thread_status` | Actualiza el estado de un hilo de comentarios (Fixed, WontFix, etc.) |
+
+### Búsqueda de Identidades
+
+| Herramienta | Descripción |
+|-------------|-------------|
+| `ado_search_users` | Busca usuarios por nombre o email. Devuelve el ID de identidad (UUID) necesario para menciones en comentarios |
 
 ### Comentarios y Discusiones
 
 | Herramienta | Descripción |
 |-------------|-------------|
-| `ado_add_comment` | Agrega un comentario a un Work Item (soporta Markdown) |
-| `ado_get_comments` | Obtiene los comentarios de un Work Item |
+| `ado_add_comment` | Agrega un comentario a un Work Item (soporta Markdown y menciones con `mentions`) |
+| `ado_get_comments` | Obtiene los comentarios de un Work Item, incluyendo menciones resueltas |
 
 ### Adjuntos
 
@@ -257,6 +263,36 @@ Esta opción es útil para cambiar entre diferentes organizaciones o proyectos s
   "comment": "## Análisis completado\n\n- Revisado el código\n- Identificados 3 issues\n\n**Próximo paso:** Corregir validaciones"
 }
 ```
+
+### Agregar Comentario con Mención
+
+Las menciones requieren el **ID de identidad (UUID)** del usuario. Hay dos formas de obtenerlo:
+
+1. **Buscar usuario** con `ado_search_users`:
+```json
+{
+  "searchTerm": "Juan Pérez"
+}
+```
+
+2. **Obtener ID desde un Work Item** — los campos `System.AssignedTo`, `System.CreatedBy` o `System.ChangedBy` contienen el `id` de identidad.
+
+Luego, agregar el comentario con la mención:
+
+```json
+{
+  "id": 12345,
+  "comment": "@Juan Pérez ¿podrías revisar este cambio?",
+  "mentions": [
+    {
+      "name": "Juan Pérez",
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    }
+  ]
+}
+```
+
+> **Nota**: El texto del comentario debe incluir `@DisplayName` o `@{DisplayName}` en la posición donde quieras la mención. El MCP reemplaza automáticamente con el HTML de mención de Azure DevOps.
 
 ### Subir y Adjuntar Archivo
 
@@ -412,7 +448,16 @@ npm run build
 npm run build    # Compila TypeScript
 npm run start    # Inicia el servidor
 npm run dev      # Modo desarrollo con watch
+npm run release:check          # Valida build y paquete NPM
+npm run release:version:patch  # Sube versión patch y sincroniza lockfile
+npm run release:version:minor  # Sube versión minor y sincroniza lockfile
+npm run release:version:major  # Sube versión major y sincroniza lockfile
+npm run release:publish        # Publica en NPM
 ```
+
+### Flujo de Release
+
+Para futuras funcionalidades, el flujo recomendado quedó documentado en [RELEASE_WORKFLOW.md](/Users/slorenzot/Desktop/Trabajo/Nespon%20Solutions/Proyectos/mcp-azure/RELEASE_WORKFLOW.md).
 
 ## Licencia
 
@@ -424,4 +469,4 @@ Soulberto Lorenzo - [@slorenzot](https://github.com/slorenzot)
 
 ## Versión
 
-**2.7.0** - 36 herramientas disponibles para Azure DevOps (Work Items, Repositorios Git, Pull Requests, sprints, áreas, comentarios y adjuntos)
+**2.7.3** - 37 herramientas disponibles para Azure DevOps (Work Items, Repositorios Git, Pull Requests, sprints, áreas, comentarios con menciones, adjuntos y búsqueda de identidades)

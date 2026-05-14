@@ -2,7 +2,7 @@
 
 ## ¿Qué es este servidor MCP?
 
-El servidor MCP (Model Context Protocol) para Azure DevOps permite interactuar con Work Items, repositorios Git, Pull Requests, sprints, áreas, comentarios y adjuntos desde OpenCode.
+El servidor MCP (Model Context Protocol) para Azure DevOps permite interactuar con Work Items, repositorios Git, Pull Requests, sprints, áreas, comentarios con menciones, adjuntos y búsqueda de identidades desde OpenCode.
 
 ## Instalación
 
@@ -91,6 +91,7 @@ Esta conexión persiste durante la sesión actual de OpenCode.
 | `ado_get_work_item` | Obtiene un Work Item por su ID |
 | `ado_create_work_item` | Crea un nuevo Work Item (User Story, Bug, Task, etc.) |
 | `ado_update_work_item` | Actualiza un Work Item existente |
+| `ado_delete_work_item` | Elimina un Work Item (soft delete por defecto) |
 | `ado_get_work_item_type_fields` | Obtiene los campos disponibles/requeridos de un tipo |
 
 ### Consultas
@@ -136,19 +137,42 @@ Esta conexión persiste durante la sesión actual de OpenCode.
 | `ado_get_pull_request_reviewers` | Obtiene todos los revisores y sus votos |
 | `ado_add_pull_request_reviewer` | Agrega un revisor a un Pull Request |
 
+### Pull Request Comments
+
+| Herramienta | Descripción |
+|-------------|-------------|
+| `ado_get_pull_request_threads` | Obtiene todos los hilos de comentarios de un Pull Request |
+| `ado_create_pull_request_thread` | Crea un nuevo hilo de comentarios (general o de código) |
+| `ado_reply_to_pull_request_thread` | Responde a un hilo de comentarios existente |
+| `ado_update_pull_request_thread_status` | Actualiza el estado de un hilo (Fixed, WontFix, etc.) |
+
+### Pull Request Info
+
+| Herramienta | Descripción |
+|-------------|-------------|
+| `ado_get_pull_request_commits` | Obtiene todos los commits de un Pull Request |
+| `ado_get_pull_request_work_items` | Obtiene los Work Items vinculados a un Pull Request |
+
+### Búsqueda de Identidades
+
+| Herramienta | Descripción |
+|-------------|-------------|
+| `ado_search_users` | Busca usuarios por nombre o email. Devuelve el ID de identidad (UUID) necesario para menciones |
+
 ### Comentarios y Discusiones
 
 | Herramienta | Descripción |
 |-------------|-------------|
-| `ado_add_comment` | Agrega un comentario a un Work Item (soporta Markdown) |
-| `ado_get_comments` | Obtiene los comentarios de un Work Item |
+| `ado_add_comment` | Agrega un comentario a un Work Item (soporta Markdown y menciones) |
+| `ado_get_comments` | Obtiene los comentarios de un Work Item, incluyendo menciones resueltas |
 
 ### Adjuntos
 
 | Herramienta | Descripción |
 |-------------|-------------|
 | `ado_upload_attachment` | Sube un archivo y devuelve la URL del adjunto |
-| `ado_add_attachment` | Agrega un adjunto a un Work Item (con nombre personalizado) |
+| `ado_add_attachment` | Agrega un adjunto a un Work Item (con manejo de concurrencia) |
+| `ado_delete_attachment` | Elimina un adjunto de un Work Item |
 | `ado_get_attachments` | Lista los adjuntos de un Work Item |
 
 ## Ejemplos de Uso en OpenCode
@@ -164,6 +188,37 @@ Esta conexión persiste durante la sesión actual de OpenCode.
   "iterationPath": "MiProyecto\\Sprint 5"
 }
 ```
+
+### Buscar un Usuario
+
+```json
+{
+  "searchTerm": "Juan Pérez"
+}
+```
+
+Devuelve el ID de identidad (UUID) necesario para menciones en comentarios.
+
+### Agregar Comentario con Mención
+
+1. Obtén el ID de identidad del usuario con `ado_search_users` o desde los campos `System.AssignedTo`/`System.CreatedBy` de un Work Item.
+
+2. Agrega el comentario con la mención:
+
+```json
+{
+  "id": 12345,
+  "comment": "@Juan Pérez ¿podrías revisar este cambio?",
+  "mentions": [
+    {
+      "name": "Juan Pérez",
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    }
+  ]
+}
+```
+
+> **Nota**: Usa `@DisplayName` o `@{DisplayName}` en el texto del comentario. El MCP reemplaza automáticamente con el HTML de mención de Azure DevOps.
 
 ### Adjuntar un archivo con nombre personalizado
 
@@ -185,12 +240,40 @@ Esta conexión persiste durante la sesión actual de OpenCode.
 }
 ```
 
+## Flujo de Trabajo con Menciones
+
+El flujo completo para mencionar usuarios en comentarios de Work Items:
+
+```
+┌─────────────────────┐
+│ ado_search_users     │  Busca "Soulberto"
+│ searchTerm: "Soul..."│
+└────────┬────────────┘
+         │ Devuelve: { id: "a7d0...", displayName: "Soulberto Lorenzo" }
+         ▼
+┌─────────────────────────┐
+│ ado_add_comment         │
+│ id: 36839               │
+│ comment: "@Soulberto.." │
+│ mentions: [{ name, id }]│
+└─────────────────────────┘
+         │
+         ▼
+┌─────────────────────────┐
+│ ado_get_comments        │  Verifica que la mención se
+│ id: 36839               │  renderizó correctamente
+└─────────────────────────┘
+```
+
+**Alternativa**: Si `ado_search_users` falla (ej: error 404 en el endpoint de identidades), obtén el ID desde un Work Item existente usando `ado_get_work_item` con `full: true`. Los campos `System.AssignedTo`, `System.CreatedBy` y `System.ChangedBy` contienen el `id` de identidad.
+
 ## Ventajas de Usar MCP en OpenCode
 
 1. **Integración directa**: No necesitas salir de OpenCode para interactuar con Azure DevOps
 2. **Configuración flexible**: Puedes cambiar entre diferentes organizaciones/proyectos fácilmente
 3. **Automatización**: Permite automatizar tareas repetitivas de Work Items y Pull Requests
 4. **Contexto completo**: OpenCode puede leer el contexto de tu proyecto para crear Work Items más precisos
+5. **Menciones**: Notifica a团队成员 directamente desde los comentarios del agente
 
 ## Soporte
 
@@ -200,4 +283,4 @@ Esta conexión persiste durante la sesión actual de OpenCode.
 
 ## Versión
 
-**2.4.1** - 34 herramientas disponibles para Azure DevOps
+**2.7.3** - 37 herramientas disponibles para Azure DevOps

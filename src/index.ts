@@ -1653,30 +1653,52 @@ server.tool(
 // Agregar comentario a un Work Item
 server.tool(
   "ado_add_comment",
-  "Agrega un comentario/entrada de discusión a un Work Item. Soporta formato Markdown.",
+  "Agrega un comentario/entrada de discusión a un Work Item. Soporta formato Markdown y menciones. Para mencionar usuarios, primero usa ado_search_users para obtener el ID de identidad (UUID), luego inclúyelo en el campo mentions. En el texto del comentario, escribe @{displayName} donde quieras la mención.",
   {
     id: z.number().describe("ID del Work Item"),
     comment: z.string().describe("Texto del comentario (soporta Markdown)"),
+    mentions: z.array(z.object({
+      name: z.string().describe("Display name del usuario"),
+      id: z.string().describe("UUID de identidad en Azure DevOps"),
+    })).optional().describe("Usuarios a mencionar (opcional). Reemplaza @{name} en el texto con menciones reales."),
   },
-  async ({ id, comment }) => {
+  async ({ id, comment, mentions }) => {
     const api = await getWitApi();
 
-    // Usar System.History para agregar comentario
-    const patchDocument: VSSInterfaces.JsonPatchOperation[] = [
-      {
-        op: VSSInterfaces.Operation.Add,
-        path: "/fields/System.History",
-        value: comment,
-      },
-    ];
+    let textToSend = comment;
 
-    await api.updateWorkItem(null, patchDocument, id);
+    // Si hay menciones, convertir @name o @{name} → HTML con data-vss-mention
+    if (mentions && mentions.length > 0) {
+      for (const mention of mentions) {
+        const mentionHtml = `<a href="#" data-vss-mention="version:2.0,${mention.id}">@${mention.name}</a>`;
+        // Reemplazar ambos formatos: @{Name} (con llaves) y @Name (sin llaves)
+        // Priorizar @{Name} primero para evitar reemplazos parciales
+        const patternWithBraces = `@{${mention.name}}`;
+        const patternWithoutBraces = `@${mention.name}`;
+        textToSend = textToSend.replaceAll(patternWithBraces, mentionHtml);
+        textToSend = textToSend.replaceAll(patternWithoutBraces, mentionHtml);
+      }
+    }
+
+    // Usar Comments API (NO System.History) — el parser de menciones funciona aquí
+    const created = await api.addComment(
+      { text: textToSend } as any,
+      currentProject,
+      id
+    );
+
+    // Construir respuesta con detalles de menciones
+    // Nota: addComment() no devuelve menciones en la respuesta inmediata (se resuelven async),
+    // pero las menciones SÍ quedan almacenadas. Verificar con ado_get_comments.
+    const mentionsInfo = mentions && mentions.length > 0
+      ? `\nMenciones incluidas: ${mentions.map(m => `@${m.name}`).join(', ')} (verificar con ado_get_comments)`
+      : '';
 
     return {
       content: [
         {
           type: "text",
-          text: `Comentario agregado exitosamente al Work Item #${id}`,
+          text: `Comentario agregado exitosamente al Work Item #${id} (Comment ID: ${created.id})${mentionsInfo}`,
         },
       ],
     };
@@ -1686,7 +1708,7 @@ server.tool(
 // Obtener comentarios de un Work Item
 server.tool(
   "ado_get_comments",
-  "Obtiene los comentarios/historial de discusión de un Work Item",
+  "Obtiene los comentarios/historial de discusión de un Work Item. Incluye menciones resueltas.",
   {
     id: z.number().describe("ID del Work Item"),
     top: z.number().optional().describe("Número máximo de comentarios a obtener (por defecto 10)"),
@@ -1694,7 +1716,8 @@ server.tool(
   async ({ id, top = 10 }) => {
     const api = await getWitApi();
 
-    const comments = await api.getComments(currentProject, id, top);
+    // CommentExpandOptions.RenderedText = 8 — incluye HTML renderizado + menciones
+    const comments = await api.getComments(currentProject, id, top, undefined, undefined, 8);
 
     if (!comments.comments || comments.comments.length === 0) {
       return {
@@ -1714,7 +1737,13 @@ server.tool(
           ? new Date(comment.createdDate).toLocaleString()
           : "Fecha desconocida";
         const text = comment.text || "(sin contenido)";
-        return `**${author}** - ${date}\n${text}\n`;
+
+        // Mostrar menciones si existen
+        const mentionsInfo = comment.mentions && comment.mentions.length > 0
+          ? `\n📎 Menciones: ${comment.mentions.map(m => `${m.artifactType || 'usuario'}(${m.artifactId || m.targetId})`).join(', ')}`
+          : '';
+
+        return `**${author}** - ${date}\n${text}${mentionsInfo}\n`;
       })
       .join("\n---\n");
 
@@ -1726,6 +1755,143 @@ server.tool(
         },
       ],
     };
+  }
+);
+
+// ============================================
+// HERRAMIENTAS DE BÚSQUEDA DE IDENTIDADES
+// ============================================
+
+// Helper para buscar usuarios via REST API (el SDK no tiene Identity API dedicada)
+async function searchUsersRest(
+  searchTerm: string
+): Promise<Array<{ id: string; displayName: string; uniqueName: string; isActive: boolean }>> {
+  if (!currentPat || !currentOrg) {
+    throw new Error("❌ No hay conexión configurada. Usa ado_configure primero.");
+  }
+
+  // Identity API requires vsaex.dev.azure.com hostname, not dev.azure.com
+  const baseUrl = currentOrg.endsWith("/") ? currentOrg.slice(0, -1) : currentOrg;
+  const identityBaseUrl = baseUrl.replace(/dev\.azure\.com/, "vsaex.dev.azure.com");
+  const encodedSearch = encodeURIComponent(searchTerm);
+  const fullUrl = `${identityBaseUrl}/_apis/identities?searchFilter=General&filterValue=${encodedSearch}&api-version=7.0`;
+
+  const urlObj = new URL(fullUrl);
+
+  const options: https.RequestOptions = {
+    hostname: urlObj.hostname,
+    path: urlObj.pathname + urlObj.search,
+    method: "GET",
+    headers: {
+      "Accept": "application/json",
+      "Authorization": `Basic ${Buffer.from(`:${currentPat}`).toString("base64")}`,
+    },
+  };
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(options, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+          try {
+            const parsed = JSON.parse(data);
+            const identities: Array<{ id: string; displayName: string; uniqueName: string; isActive: boolean }> = [];
+
+            if (parsed.value && Array.isArray(parsed.value)) {
+              for (const identity of parsed.value) {
+                identities.push({
+                  id: identity.id || "",
+                  displayName: identity.properties?.Account?.value?.displayName
+                    || identity.displayName
+                    || identity.properties?.DisplayName?.value
+                    || "",
+                  uniqueName: identity.properties?.Account?.value?.uniqueName
+                    || identity.uniqueName
+                    || identity.properties?.MailAddress?.value
+                    || "",
+                  isActive: identity.isActive ?? true,
+                });
+              }
+            }
+
+            resolve(identities);
+          } catch (parseError) {
+            reject(new Error(`Error al parsear respuesta de búsqueda de identidades: ${parseError instanceof Error ? parseError.message : 'Error desconocido'}`));
+          }
+        } else {
+          reject(new Error(`Error HTTP ${res.statusCode} al buscar identidades: ${data}`));
+        }
+      });
+    });
+
+    req.on("error", (error) => reject(new Error(`Error de red al buscar identidades: ${error.message}`)));
+    req.end();
+  });
+}
+
+// Buscar usuario por nombre o email
+server.tool(
+  "ado_search_users",
+  "Busca usuarios en Azure DevOps por nombre o email. Devuelve el ID de identidad (UUID) necesario para menciones en comentarios (@{name}) y otras operaciones. Usa el resultado en ado_add_comment con el campo mentions.",
+  {
+    searchTerm: z.string().describe("Nombre o email del usuario a buscar (mínimo 3 caracteres)"),
+  },
+  async ({ searchTerm }) => {
+    if (!searchTerm || searchTerm.length < 3) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "❌ El término de búsqueda debe tener al menos 3 caracteres.",
+          },
+        ],
+      };
+    }
+
+    try {
+      const identities = await searchUsersRest(searchTerm);
+
+      if (identities.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No se encontraron usuarios para "${searchTerm}". Intenta con un nombre o email diferente.`,
+            },
+          ],
+        };
+      }
+
+      const usersList = identities
+        .map((user, index) => {
+          const statusIcon = user.isActive ? "🟢" : "⚪";
+          return `${index + 1}. ${statusIcon} **${user.displayName}**\n   - ID: \`${user.id}\`\n   - Email: \`${user.uniqueName}\``;
+        })
+        .join("\n\n");
+
+      const usageHint = identities.length === 1
+        ? `\n\n💡 **Uso en menciones:** Usa este ID en \`ado_add_comment\`:\n\`\`\`\nmentions: [{ name: "${identities[0].displayName}", id: "${identities[0].id}" }]\n\`\`\``
+        : `\n\n💡 Copia el **ID** del usuario deseado y úsalo en \`ado_add_comment\` con el campo \`mentions\`.`;
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `**${identities.length} usuario(s) encontrado(s)** para "${searchTerm}":\n\n${usersList}${usageHint}`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `❌ Error al buscar usuarios: ${error.message}`,
+          },
+        ],
+      };
+    }
   }
 );
 
